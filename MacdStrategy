@@ -1,0 +1,450 @@
+#Best Long term. After 6 years 150% profit on first run
+
+#After analyizing with multiple stocks, now test with only one stock again and really nail down MACD accuracy. 
+# 1) Add logs that show the stats of the invested stocks daily (signal, macd, fast, slot, difference, price, etc.)
+#   a) With that data manually solve macd equation, and see if algorithm matches up.
+#   b) Do this as many times feasible that ensures accuracy
+#***************** Paper Test Here, does the algo make real money after 1 month*****************************************
+# Heavily investing in some stocks that are not as profitable is stopping the investing of the more profitable stocks
+# 2) Solution for how much of portfolio to invest in each stock
+#   a) Histogram Logic
+#   b) How different are the signal and macd
+#   c) Integrate a long EMA compare to price. If price is greater then invest. The greater gap between Price and EMA, the larger % to invest 
+
+from Selection.QC500UniverseSelectionModel import QC500UniverseSelectionModel
+from itertools import groupby
+from math import ceil
+
+class MACDTrendAlgorithm(QCAlgorithm):
+
+    def Initialize(self):
+
+        self.Debug("Gerad Initialize")
+        self.SetStartDate(2020, 1, 1)    #Set Start Date
+        self.SetEndDate(2020, 12, 31)      #Set End Date
+        self.SetCash(10000)             #Set Strategy Cash
+        self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
+        self.UniverseSettings.DataNormalizationMode = DataNormalizationMode.SplitAdjusted
+        self.shortMovingAverage = 50
+        self.longMovingAverage = 200
+        self.SetWarmUp(226)
+        self.minimumStockPrice = 10
+        self.buySellTolerance = 0.0001
+        self.percentagePortfolioAllowedPerAsset = .3333 #At most 33% of total funds can be used to buy a stock
+        
+        self.UniverseSettings.Resolution = Resolution.Daily
+        self.UniverseSettings.Leverage = 1
+        self.MaxNumberOfPortfolio = 10
+        self.StopLossLimit = .999 #Gannon - How much are we willing to lose, right now allow a .1% loss before selling
+        self.AttemptedProfitPercentage = 1.01 #Allow a 1% profit before using histogram to sell
+        self.averages = { }
+        self.StocksToChart = { } #Beta
+        self.ProfitsBySymbol = { } #Gannon ProfitsBySymbol holds the stock sticker, the stock price change, and sum total profits [ { 'AMZN', 46.4, 6700 }, { 'FB', 54,  2300} ] ProfityBySymbol[0][0] = ProfityBySymbol [AMZN] = 46.4
+        self.InvestedHistory = [] #Beta use for end of algorithm full history look up
+        self.InvestedAssetsHighestPriceList = { }
+        self.InvestedAssetsSumTotalPriceList = { }
+        self.InvestedAssetsOriginalPriceList = { }
+        self.InvestedOrderInfoDictionary = { }
+        self.dollarVolumeBySymbol = {}
+        self.StockToWatch = "AMD"
+        self.SpFiveOnly = False
+        self.SetSecurityInitializer(lambda x: x.SetMarketPrice(self.GetLastKnownPrice(x)))
+        self.OrderedByHighestOpportunity = []
+        # Schedule function 20 minutes after every market open
+        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.At(9, 50), Action(self.EveryMarketOpen))
+        self.Debug("Gerad Initialize Finished.")
+        
+        #self.StockInvestmentData = { }
+        
+    
+    # sort the data by daily dollar volume and take the top 'NumberOfSymbols'
+    def CoarseSelectionFunction(self, coarseList):
+        signalDeltaPercent = 0
+        if self.SpFiveOnly:
+            filtered = [ x for x in coarseList if float(x.Price) > self.minimumStockPrice and x.HasFundamentalData and (x.Volume > 0)][:100]
+            sortedByVolume = sorted(filtered, key=lambda x: x.Volume, reverse=True)
+        else:
+            filtered = [ x for x in coarseList if float(x.Price) > self.minimumStockPrice and x.DollarVolume > 1000000]
+            sortedByVolume = sorted(filtered, key=lambda x: x.DollarVolume, reverse=True)[:100]
+            
+        
+        self.dollarVolumeBySymbol.clear()
+        for x in sortedByVolume:
+            self.dollarVolumeBySymbol[x.Symbol] = x.DollarVolume
+
+
+        return [x.Symbol for x in sortedByVolume]
+        
+        
+        
+    def FineSelectionFunction(self, fineList):
+        
+        if self.SpFiveOnly:
+            filtered = [ x for x in fineList if x.CompanyReference.CountryId == "USA" and (x.CompanyReference.PrimaryExchangeID == "NYS" \
+                or x.CompanyReference.PrimaryExchangeID == "NAS") and (self.Time - x.SecurityReference.IPODate).days > 180 and x.MarketCap > 500000000]
+                
+            # select stocks with top dollar volume in every single sector
+            sortedBySector = sorted(filtered, key = lambda x: x.CompanyReference.IndustryTemplateCode)
+    
+            percent = 500/float(len(sortedBySector))
+            sortedByDollarVolume = []
+            
+            for code, g in groupby(sortedBySector, lambda x: x.CompanyReference.IndustryTemplateCode):
+                y = sorted(g, key = lambda x: self.dollarVolumeBySymbol[x.Symbol], reverse = True)
+                c = ceil(len(y) * percent)
+                sortedByDollarVolume.extend(y[:c])
+    
+            sortedByDollarVolume = sorted(sortedByDollarVolume, key = lambda x: self.dollarVolumeBySymbol[x.Symbol], reverse=True)[:10]
+        else:
+            sortedByDollarVolume = [ x for x in fineList][:10]
+
+        for coarseData in sortedByDollarVolume:
+            
+            history = self.History(coarseData.Symbol, 226, Resolution.Daily)
+            if coarseData.Symbol not in self.averages or self.averages[coarseData.Symbol].refresh == True:
+                self.averages[coarseData.Symbol] = SymbolTrendData(coarseData.Symbol, history, coarseData.Price)
+                
+            # Updates the SymbolTrendData object with current EOD price
+            avg = self.averages[coarseData.Symbol]
+            avg.longEma.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
+            avg.shortEma.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
+            avg.fast.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close) #Gets the last days closing price.  #Make this parameter 
+            avg.slow.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
+            avg.update(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
+                 
+        # Sell any assets that are no longer trending, and predicted that the price will fall
+        self.SellNonTrendingAssets()
+        
+        # Get only uptrending stocks, and filter out any stocks where the EMAs could not be calculated
+        values = list(filter(lambda x: x.trending and #******GERAD ADD THIS BACK IF NO WORK!!!
+             (x.differenceOfMacdAndSignal > self.buySellTolerance or self.AnalyzeBuyHistogram(x.symbol))
+            and x.CanUse == True, 
+            self.averages.values()))
+
+        # Sorts by the greatest difference between the moving averages
+        # Gerad see if this helps or if just the scale sort is needed
+        #values.sort(key=lambda x: x.differenceOfMacdAndSignal, reverse=True)
+        values.sort(key=lambda x: x.differenceOfHistogramEarlySignal, reverse=True)
+
+        self.OrderedByHighestOpportunity = [ x.symbol for x in values]
+        
+        # Sorts by the greatest difference between the moving averages
+        # Gerad see if this helps or if just the differenceOfMacdAndSignal sort is needed. 
+        #mostDifference.sort(key=lambda x: x.scale, reverse=True)
+        
+
+        #TODO Need to figure out how to do Portfolio optimization, right now only returning a list of sorted best stocks out of 1000. Complex calculations will take too long, and thats too many stocks to afford
+        #Current work around is to limit the amount of stocks coming back from the MACD filter
+        
+        #self.StockInvestmentData[self.Time] = mostDifference
+        
+        return self.OrderedByHighestOpportunity
+        
+    
+    def SellNonTrendingAssets(self):
+        for asset in self.Securities:
+            if asset.Value.Invested:
+                self.IsAssetSellable(asset)
+        
+        
+    def IsAssetSellable(self, asset):
+        desiredProfit = self.InvestedAssetsOriginalPriceList[asset.Key] * self.AttemptedProfitPercentage
+        
+        if self.averages[asset.Key].differenceOfMacdAndSignal < -self.buySellTolerance:
+            self.InvestedOrderInfoDictionary[asset.Key] = \
+                self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, "Broke Macd")
+            self.InvestedAssetsHighestPriceList[asset.Key] = self.Portfolio[asset.Key].Price
+            
+        elif self.Portfolio[asset.Key].Price > desiredProfit \
+            and self.AnalyzeHistogram(asset):
+                self.InvestedOrderInfoDictionary[asset.Key] = \
+                    self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, "Histogram Trend Shift")
+                self.InvestedAssetsHighestPriceList[asset.Key] = self.Portfolio[asset.Key].Price
+    
+    
+    def AnalyzeHistogram(self, asset):
+        histogramList = self.averages[asset.Key].histogramRepository
+        downTrending = False
+        
+        if len(histogramList) >= 2:
+            downTrending = histogramList[0] < histogramList[1]
+            
+        return downTrending
+        
+    
+    def AnalyzeBuyHistogram(self, symbol):
+        upTrending = False
+        if symbol in self.averages:
+            histogramList = self.averages[symbol].histogramRepository
+            
+            #Add Is Ready Check here
+            if len(histogramList) >= 3:
+                #Check that the histogram has been trending up the last 2 days and that the histogram was negative 2 days ago
+                #This is to catch the very beginning of the trend with some confidence that its rising over 2 days.
+                upTrending = (histogramList[0] > histogramList[1] > histogramList[2]) \
+                    and histogramList[2] < 0
+                
+            self.Debug("Gerad Trend Set")
+            return upTrending
+    
+    
+    def OnSecuritiesChanged(self, changes):
+        self.Debug("Gerad OnSecuritiesChanged")
+        currentBuyTotal = 0
+        
+        for symbol in self.OrderedByHighestOpportunity:
+            numberOfOrdersPossible = self.CalculateOrderQuantity(symbol, self.percentagePortfolioAllowedPerAsset)
+            
+            #Add 2% of order value to total cost check to ensure portfolio is not overdrawn
+            minimumCashNeeded = numberOfOrdersPossible * self.Securities[symbol].Price + ((numberOfOrdersPossible * self.Securities[symbol].Price) / 50) 
+            
+            if numberOfOrdersPossible >= 1 and minimumCashNeeded < self.Portfolio.Cash - currentBuyTotal:
+                avg = self.averages[symbol]
+                orderQuantity = self.CalculateOrderQuantity(symbol, self.percentagePortfolioAllowedPerAsset)
+
+                self.SetHoldings(symbol, self.percentagePortfolioAllowedPerAsset)
+                
+                historyOfInvestedAsset = self.History(symbol, 26, Resolution.Daily)
+                symbolBoughtTimeTuple = (symbol, self.Time, self.averages[symbol], historyOfInvestedAsset)
+                self.InvestedHistory.append(symbolBoughtTimeTuple)
+                
+                self.InvestedAssetsHighestPriceList[symbol] = self.Securities[symbol].Price
+                self.InvestedAssetsOriginalPriceList[symbol] = self.Securities[symbol].Price
+                #Gannon Save away the total amount of dollars we're investing by multiplying the current price by the numberOfOrdersPossible variable
+                #self.InvestedAssetsSumTotalPriceList[security.Symbol] = ...
+                
+                if symbol not in self.ProfitsBySymbol:
+                    self.ProfitsBySymbol[symbol] = (0, 0)
+                    
+                #Gerad Add updating histogram here to sell with look ahead
+                currentBuyTotal += minimumCashNeeded
+        
+    # Gannon this method always runs when and order is executed, right now the if statment quantity < 0 is only finding sell orders
+    # You need to use this method to subtract the buy price from the final sale price. Then you need to find out in total how many stocks we've purchased
+    # to find the total profits we've obtained from a stock.
+    def OnOrderEvent(self, orderEvent):
+        self.Debug("Gerad OnOrderEvent")
+        if orderEvent.FillQuantity < 0 and self.Portfolio[orderEvent.Symbol].Quantity == 0:
+            self.averages[orderEvent.Symbol].refresh = True
+            
+            
+            # Gannon -CODING HERE you need to update the second index in the dictionary with the sum total profits from each invested stock.
+            # The below example updates the dollar profits per stock in the dictionary.
+            # Remember a dictionary in code is literally like a dictionary where in reality where you look something up by a name (Key), and 
+            # name leads to more information (Value). 
+            #
+            # Our dictionary is called self.ProfitsBySymbol, the key is the stock symbol, and the value is 
+            #   1) the dollar profits per share         ----> Remember this is mine, you don't need to worry about changing this value
+            #   2) the sum total of all buys and sells. ----> Remember this is the value YOU are changing every time we SELL the stock here.
+            #
+            # When solving a problem in code, it really helps if you say the problem outloud and then focus on the parts that you don't know.
+            # For instance, this is how I solved this problem.
+            #
+            # Do I have a value that currently holds the sum profits? you don't immediatly know how much profits  To find the total profits, multiply orderEvent.FillPrice by the orderEvent.FillQuantity sold. Change this to 1 self.ProfitsBySymbol[orderEvent.Symbol][2]
+            self.ProfitsBySymbol[orderEvent.Symbol] = (orderEvent.FillPrice - self.InvestedAssetsOriginalPriceList[orderEvent.Symbol], )
+            #self.ProfitsBySymbol[orderEvent.Symbol] = self.InvestedAssetsSumTotalPriceList[orderEvent.Symbol] FINISH EQUATION
+
+    #Update the trailing stop loss
+    def EveryMarketOpen(self):
+        
+        for asset in self.Securities:
+            
+            #Take the higher of the prices (last close or current), and update the stop loss if necessary
+            stopLossPriceCheck = max(self.Securities[asset.Key].Price, self.Securities[asset.Key].Close)
+            
+            if asset.Value.Invested:
+                safetyNet = stopLossPriceCheck *  self.StopLossLimit
+                
+                if self.Securities[asset.Key].Invested and \
+                    self.Transactions.GetOpenOrders(asset.Key) and \
+                    stopLossPriceCheck > self.InvestedAssetsHighestPriceList[asset.Key]:
+                        
+                    updateFields = UpdateOrderFields()
+                    updateFields.StopPrice = safetyNet
+                    self.InvestedOrderInfoDictionary[asset.Key].Update(updateFields)
+                    self.InvestedAssetsHighestPriceList[asset.Key] = stopLossPriceCheck
+                    
+                    
+            #Beta - Stocks to watch, when you know ahead of time what stocks you want charted
+            #if asset.Key in self.Securities and self.Securities[asset.Key].Invested:
+            #and self.StockToWatch in asset.Key.Value:
+            if "AMZN" in asset.Key.Value or "PCLN" in asset.Key.Value:
+                
+                lastClosePriceHistory = self.History(asset.Key, 1, Resolution.Daily)
+                lastClosePrice = list(lastClosePriceHistory.itertuples())[0].close
+                
+                if asset.Key not in self.StocksToChart:
+                    history = self.History(asset.Key, 226, Resolution.Daily)
+                    self.StocksToChart[asset.Key] = SymbolTrendData(asset.Key, history, lastClosePrice)
+                
+                #Update watched stocks with latest data to chart    
+                self.StocksToChart[asset.Key].updateForCharting(lastClosePrice)   
+                
+                self.Plot(str(asset.Key.Value) + " Data Chart", "MacD", self.StocksToChart[asset.Key].macdValue)
+                self.Plot(str(asset.Key.Value) + " Data Chart", "Signal", self.StocksToChart[asset.Key].signalValue.GetMovingAverageForPeriod())
+                self.Plot(str(asset.Key.Value) + " Price Chart", "Fast", self.StocksToChart[asset.Key].fast.GetMovingAverageForPeriod())
+                self.Plot(str(asset.Key.Value) + " Price Chart", "Slow", self.StocksToChart[asset.Key].slow.GetMovingAverageForPeriod())
+                self.Plot(str(asset.Key.Value) + " Price Chart", "Price", lastClosePrice)
+                
+        for asset in self.Securities:
+            # Create trailing stop loss if invested 
+            if asset.Value.Invested:
+                #Take the higher of the prices Close or Current, and update the stop loss if necessary
+                stopLossPriceCheck = max(self.Securities[asset.Key].Price, self.Securities[asset.Key].Close)
+                safetyNet = stopLossPriceCheck * self.StopLossLimit
+                
+                if self.Securities[asset.Key].Invested and \
+                    self.Transactions.GetOpenOrders(asset.Key) and \
+                    stopLossPriceCheck > self.InvestedAssetsHighestPriceList[asset.Key]:
+                        
+                    updateFields = UpdateOrderFields()
+                    updateFields.StopPrice = safetyNet
+                    self.InvestedOrderInfoDictionary[asset.Key].Update(updateFields)
+                    self.InvestedAssetsHighestPriceList[asset.Key] = stopLossPriceCheck
+                    
+                
+    def OnEndOfAlgorithm(self):
+        self.Debug("Listing symbols that were invested over this algorithm run.")
+        if len(self.ProfitsBySymbol) > 0:
+            #Gannon this lambda index needs to change from 1 to be 2 instead, when you finish writing the sum total logic. key=lambda x:x[2]
+            sortedProfits = sorted(self.ProfitsBySymbol.items(), key=lambda x:x[0])
+            biggestLoser = sortedProfits[0]
+            biggestWinner = sortedProfits[len(sortedProfits) - 1]
+            
+            self.Debug("Biggest Loser Symbol: " + str(biggestLoser[0]) + " Profits: " + str(biggestLoser[1]))
+            self.Debug("Biggest Winner Symbol: " + str(biggestWinner[0]) + " Profits: " + str(biggestWinner[1]))
+            
+        #for investedSymbol in self.InvestedHistory:
+            #self.Debug("Symbol: " + str(investedSymbol[0]) + " DateTime: " + str(investedSymbol[1]) + " Data: " + str(investedSymbol[2]))
+            #summarySymbol = SymbolTrendData(investedSymbol[0], investedSymbol[3])
+            #self.Debug(" Date Example = " + str(list(self.StockInvestmentData.keys())[0]))
+        
+        
+    
+    
+class SymbolTrendData(object):
+    def __init__(self, symbol, history, price, logResults = False):
+        self.symbol = symbol
+        self.price = price
+        self.tolerance = 1.002
+        self.longEma = GeradExponentialMovingAverage(200)
+        self.shortEma = GeradExponentialMovingAverage(50)
+        self.fast = GeradExponentialMovingAverage(12)
+        self.slow = GeradExponentialMovingAverage(26)
+        self.signalValue = GeradExponentialMovingAverage(9)
+        self.signalLimit = 9
+        self.trending = False
+        self.refresh = False
+        self.scale = 0
+        self.lastUpdatedPrice = 0
+        self.macdValue = 0
+        self.macdSignalList = []
+        self.histogramRepository = []
+        self.differenceOfMacdAndSignal = 0
+        self.differenceOfHistogramEarlySignal = 0
+        self.CanUse = True #Change this to some optimization level when adding risk management 
+        
+        #Loop over the history data and update the indicators
+        for bar in history.itertuples():
+            self.updateForCharting(bar.close)
+                
+                
+    def __str__(self):
+        return "Symbol: " + str(self.symbol) + \
+                " price  " + str(self.price) + \
+                " tolerance  " + str(self.tolerance) + \
+                " fast " + str(self.fast.GetMovingAverageForPeriod()) + \
+                " slow " + str(self.slow.GetMovingAverageForPeriod()) + \
+                " signalValue " + str(self.signalValue.GetMovingAverageForPeriod()) + \
+                " signalLimit " + str(self.signalLimit) + \
+                " trending " + str(self.trending) + \
+                " scale " + str(self.scale) + \
+                " lastUpdatedPrice " + str(self.lastUpdatedPrice) + \
+                " macdValue " + str(self.macdValue) + \
+                " macdSignalList " + str(self.macdSignalList) + \
+                " differenceOfMacdAndSignal " + str(self.differenceOfMacdAndSignal) + \
+                " differenceOfHistogramEarlySignal " + str(self.differenceOfHistogramEarlySignal) + \
+                " CanUse " + str(self.CanUse)
+    
+    
+    def updateForCharting(self, closePrice):
+        self.fast.UpdateMovingAverage(closePrice)
+        self.slow.UpdateMovingAverage(closePrice)
+        self.longEma.UpdateMovingAverage(closePrice)
+        self.shortEma.UpdateMovingAverage(closePrice)
+        self.update(closePrice)    
+        
+    def update(self, value):
+        self.price = value
+        fast = self.fast.GetMovingAverageForPeriod()
+        slow = self.slow.GetMovingAverageForPeriod()
+        longEma = self.longEma.GetMovingAverageForPeriod()
+        shortEma = self.shortEma.GetMovingAverageForPeriod()
+        
+        if type(fast) is type(None) or type(slow) is type(None) or type(longEma) is type(None) or type(shortEma) is type(None):
+            self.CanUse = False
+            return
+        
+        self.trending = fast > slow * self.tolerance and shortEma > longEma * self.tolerance
+        self.UpdateMacdAndSignalValues(fast, slow, value)
+        signalEma = self.signalValue.GetMovingAverageForPeriod()
+        
+        if type(self.macdValue) is type(None) or type(self.signalValue) is type(None) or type(signalEma) is type(None):
+            self.CanUse = False
+            return
+        
+        self.scale = (self.macdValue) / ((fast + slow) / 2.0)
+        self.differenceOfMacdAndSignal = self.macdValue - signalEma
+        self.histogramRepository.insert(0, self.differenceOfMacdAndSignal)
+        
+        #Limit how many values the histogramRepository can hold 
+        if len(self.histogramRepository) > self.signalLimit:
+            self.histogramRepository = self.histogramRepository[:self.signalLimit]
+            
+        self.CanUse = True
+        
+            
+    def UpdateMacdAndSignalValues(self, fast, slow, currentPrice):
+        self.macdValue = fast - slow
+        self.CurrentPrice = currentPrice
+        self.macdSignalList.insert(0, self.macdValue)
+        
+        #Limit how many values the macdSignalList can hold 
+        if len(self.macdSignalList) > self.signalLimit:
+            self.macdSignalList = self.macdSignalList[:self.signalLimit]
+            
+        self.signalValue.UpdateMovingAverage(self.macdValue)
+        self.EarlyBuyDetectionAlgorithm()
+    
+    
+    def EarlyBuyDetectionAlgorithm(self):
+        if len(self.histogramRepository) >= 3:
+            self.differenceOfHistogramEarlySignal = \
+                min(
+                    self.histogramRepository[1] - self.histogramRepository[0], 
+                    self.histogramRepository[2] - self.histogramRepository[1])
+                    
+                    
+    
+class GeradExponentialMovingAverage(object):
+    def __init__(self, period):
+        self.lastPrice = 0
+        self.period = period
+        self.valuesOverPeriodQueue = []
+        self.CurrentPrice = 0
+        
+    def UpdateMovingAverage(self, currentPrice):
+        self.CurrentPrice = currentPrice
+        self.valuesOverPeriodQueue.insert(0, self.CurrentPrice)
+        
+        if len(self.valuesOverPeriodQueue) > self.period:
+            self.valuesOverPeriodQueue = self.valuesOverPeriodQueue[:self.period]
+            
+        if len(self.valuesOverPeriodQueue) > 1:
+            self.lastPrice = self.valuesOverPeriodQueue[1]
+    
+    def GetMovingAverageForPeriod(self):
+        if len(self.valuesOverPeriodQueue) == self.period:
+            sumOfAverageValues = sum(self.valuesOverPeriodQueue)
+            numberOfValues = len(self.valuesOverPeriodQueue)
+            return sumOfAverageValues / numberOfValues
