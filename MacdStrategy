@@ -11,32 +11,32 @@
 #   b) How different are the signal and macd
 #   c) Integrate a long EMA compare to price. If price is greater then invest. The greater gap between Price and EMA, the larger % to invest 
 
-from Selection.QC500UniverseSelectionModel import QC500UniverseSelectionModel
 from itertools import groupby
 from math import ceil
+import plotly.express as px
+from datetime import datetime, timedelta
 
 class MACDTrendAlgorithm(QCAlgorithm):
 
     def Initialize(self):
 
         self.Debug("Gerad Initialize")
-        self.SetStartDate(2020, 1, 1)    #Set Start Date
-        self.SetEndDate(2020, 12, 31)      #Set End Date
-        self.SetCash(10000)             #Set Strategy Cash
+        self.SetStartDate(2019, 1, 1)    # lllllll Set Start Date
+        self.SetEndDate(2019, 12, 31)     # VVVVVV  set End Date
+        self.PERIOD_RUN_TIME = 12 #GERAD YOU HAVE TO ALWAYS SET THIS IF YOU CHANGE THE DATE, DOWN BELOW TOO!!!!!
+        self.SetCash(14218)             #Set Strategy Cash
         self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
-        self.UniverseSettings.DataNormalizationMode = DataNormalizationMode.SplitAdjusted
         self.shortMovingAverage = 50
         self.longMovingAverage = 200
         self.SetWarmUp(226)
         self.minimumStockPrice = 10
-        self.buySellTolerance = 0.0001
-        self.percentagePortfolioAllowedPerAsset = .3333 #At most 33% of total funds can be used to buy a stock
-        
+        self.buySellTolerance = 0.000
+        self.percentagePortfolioAllowedPerAsset = .22 #At most 22% of total funds can be used to buy a stock
         self.UniverseSettings.Resolution = Resolution.Daily
         self.UniverseSettings.Leverage = 1
         self.MaxNumberOfPortfolio = 10
         self.StopLossLimit = .999 #Gannon - How much are we willing to lose, right now allow a .1% loss before selling
-        self.AttemptedProfitPercentage = 1.01 #Allow a 1% profit before using histogram to sell
+        self.AttemptedProfitPercentage = 1.05 #Allow a 1% profit before using histogram to sell
         self.averages = { }
         self.StocksToChart = { } #Beta
         self.ProfitsBySymbol = { } #Gannon ProfitsBySymbol holds the stock sticker, the stock price change, and sum total profits [ { 'AMZN', 46.4, 6700 }, { 'FB', 54,  2300} ] ProfityBySymbol[0][0] = ProfityBySymbol [AMZN] = 46.4
@@ -50,8 +50,10 @@ class MACDTrendAlgorithm(QCAlgorithm):
         self.SpFiveOnly = False
         self.SetSecurityInitializer(lambda x: x.SetMarketPrice(self.GetLastKnownPrice(x)))
         self.OrderedByHighestOpportunity = []
-        # Schedule function 20 minutes after every market open
-        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.At(9, 50), Action(self.EveryMarketOpen))
+        
+        # Schedule function 30 minutes after every market open
+        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.At(9, 30), Action(self.EveryMarketOpen))
+        
         self.Debug("Gerad Initialize Finished.")
         
         #self.StockInvestmentData = { }
@@ -61,24 +63,21 @@ class MACDTrendAlgorithm(QCAlgorithm):
     def CoarseSelectionFunction(self, coarseList):
         signalDeltaPercent = 0
         if self.SpFiveOnly:
-            filtered = [ x for x in coarseList if float(x.Price) > self.minimumStockPrice and x.HasFundamentalData and (x.Volume > 0)][:100]
+            filtered = [ x for x in coarseList if float(x.Price) > self.minimumStockPrice and x.HasFundamentalData and (x.Volume > 0)][:1000]
             sortedByVolume = sorted(filtered, key=lambda x: x.Volume, reverse=True)
         else:
             filtered = [ x for x in coarseList if float(x.Price) > self.minimumStockPrice and x.DollarVolume > 1000000]
-            sortedByVolume = sorted(filtered, key=lambda x: x.DollarVolume, reverse=True)[:100]
+            sortedByVolume = sorted(filtered, key=lambda x: x.DollarVolume, reverse=True)[:1000]
             
-        
         self.dollarVolumeBySymbol.clear()
         for x in sortedByVolume:
             self.dollarVolumeBySymbol[x.Symbol] = x.DollarVolume
-
 
         return [x.Symbol for x in sortedByVolume]
         
         
         
     def FineSelectionFunction(self, fineList):
-        
         if self.SpFiveOnly:
             filtered = [ x for x in fineList if x.CompanyReference.CountryId == "USA" and (x.CompanyReference.PrimaryExchangeID == "NYS" \
                 or x.CompanyReference.PrimaryExchangeID == "NAS") and (self.Time - x.SecurityReference.IPODate).days > 180 and x.MarketCap > 500000000]
@@ -94,24 +93,25 @@ class MACDTrendAlgorithm(QCAlgorithm):
                 c = ceil(len(y) * percent)
                 sortedByDollarVolume.extend(y[:c])
     
-            sortedByDollarVolume = sorted(sortedByDollarVolume, key = lambda x: self.dollarVolumeBySymbol[x.Symbol], reverse=True)[:10]
+            sortedByDollarVolume = sorted(sortedByDollarVolume, key = lambda x: self.dollarVolumeBySymbol[x.Symbol], reverse=True)[:20]
         else:
-            sortedByDollarVolume = [ x for x in fineList][:10]
+            sortedByDollarVolume = [ x for x in fineList][:20]
 
         for coarseData in sortedByDollarVolume:
             
-            history = self.History(coarseData.Symbol, 226, Resolution.Daily)
+            #The History look back needs to be 227 days. 
+            #   a) 226 days is the minimum required to warm up EMAs
+            #   b) The previous day will be calculated in the next update call, so don't include previous day in the total 226 days needed for EMAs.
+            history = self.History(coarseData.Symbol, 227, Resolution.Daily)
             if coarseData.Symbol not in self.averages or self.averages[coarseData.Symbol].refresh == True:
-                self.averages[coarseData.Symbol] = SymbolTrendData(coarseData.Symbol, history, coarseData.Price)
+                self.averages[coarseData.Symbol] = SymbolTrendData(coarseData.Symbol, history[:-1], coarseData.Price)
                 
             # Updates the SymbolTrendData object with current EOD price
+            closeOfTradeBar = list(history.itertuples())[-1].close
+            
             avg = self.averages[coarseData.Symbol]
-            avg.longEma.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
-            avg.shortEma.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
-            avg.fast.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close) #Gets the last days closing price.  #Make this parameter 
-            avg.slow.UpdateMovingAverage(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
-            avg.update(list(history.itertuples())[len(list(history.itertuples())) - 1].close)
-                 
+            avg.updateForCharting(closeOfTradeBar)
+                
         # Sell any assets that are no longer trending, and predicted that the price will fall
         self.SellNonTrendingAssets()
         
@@ -121,18 +121,23 @@ class MACDTrendAlgorithm(QCAlgorithm):
             and x.CanUse == True, 
             self.averages.values()))
 
-        # Sorts by the greatest difference between the moving averages
-        # Gerad see if this helps or if just the scale sort is needed
-        #values.sort(key=lambda x: x.differenceOfMacdAndSignal, reverse=True)
-        values.sort(key=lambda x: x.differenceOfHistogramEarlySignal, reverse=True)
 
+        # Sorts by the greatest difference between the moving averages
+        #values.sort(key=lambda x: x.differenceOfMacdAndSignal, reverse=True)
+        
+        # Sorts the difference of the histogram early signal value. The greater the signal value, the more aggressive the change in price difference toward the positive direction
+        # Comment out if you want to turn off early buy historgram
+        values.sort(key=lambda x: x.differenceOfHistogramEarlySignal, reverse=True)
+        
+        # Sorts by the least number of periods since the macd break, giving the earliest detection signals. 
+        values.sort(key=lambda x: x.numberOfPeriodsSinceMacdBreak)
+        
         self.OrderedByHighestOpportunity = [ x.symbol for x in values]
         
         # Sorts by the greatest difference between the moving averages
         # Gerad see if this helps or if just the differenceOfMacdAndSignal sort is needed. 
         #mostDifference.sort(key=lambda x: x.scale, reverse=True)
         
-
         #TODO Need to figure out how to do Portfolio optimization, right now only returning a list of sorted best stocks out of 1000. Complex calculations will take too long, and thats too many stocks to afford
         #Current work around is to limit the amount of stocks coming back from the MACD filter
         
@@ -151,23 +156,29 @@ class MACDTrendAlgorithm(QCAlgorithm):
         desiredProfit = self.InvestedAssetsOriginalPriceList[asset.Key] * self.AttemptedProfitPercentage
         
         if self.averages[asset.Key].differenceOfMacdAndSignal < -self.buySellTolerance:
+            brokeMacdString = "Broke Sell Macd. Symbol " + str(asset.Key) + " Difference: " + str(self.averages[asset.Key].differenceOfMacdAndSignal) \
+                + " Macd: " + str(self.averages[asset.Key].macdValue) + " Signal: " + str(self.averages[asset.Key].signalValue.GetMovingAverageForPeriod())
+            self.Debug(brokeMacdString)
             self.InvestedOrderInfoDictionary[asset.Key] = \
-                self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, "Broke Macd")
+                self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, brokeMacdString)
             self.InvestedAssetsHighestPriceList[asset.Key] = self.Portfolio[asset.Key].Price
             
         elif self.Portfolio[asset.Key].Price > desiredProfit \
-            and self.AnalyzeHistogram(asset):
-                self.InvestedOrderInfoDictionary[asset.Key] = \
-                    self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, "Histogram Trend Shift")
-                self.InvestedAssetsHighestPriceList[asset.Key] = self.Portfolio[asset.Key].Price
+        and self.AnalyzeHistogram(asset):
+            histogramList = self.averages[asset.Key].histogramRepository
+            histogramTrendShift = "Histogram Trend Shift. Symbol " + str(asset.Key) + " List[0]: " + str(histogramList[0]) \
+                + " > List[1]: " + str(histogramList[1]) + " > List[2]: " + str(histogramList[2]) 
+            self.Debug(histogramTrendShift)
+            self.InvestedOrderInfoDictionary[asset.Key] = \
+                self.StopMarketOrder(asset.Key, -self.Portfolio[asset.Key].Quantity, self.Portfolio[asset.Key].Price * self.StopLossLimit, histogramTrendShift)
+            self.InvestedAssetsHighestPriceList[asset.Key] = self.Portfolio[asset.Key].Price
     
     
     def AnalyzeHistogram(self, asset):
         histogramList = self.averages[asset.Key].histogramRepository
         downTrending = False
-        
         if len(histogramList) >= 2:
-            downTrending = histogramList[0] < histogramList[1]
+            downTrending = float(histogramList[0]) < float(histogramList[1])
             
         return downTrending
         
@@ -176,23 +187,23 @@ class MACDTrendAlgorithm(QCAlgorithm):
         upTrending = False
         if symbol in self.averages:
             histogramList = self.averages[symbol].histogramRepository
-            
             #Add Is Ready Check here
             if len(histogramList) >= 3:
                 #Check that the histogram has been trending up the last 2 days and that the histogram was negative 2 days ago
                 #This is to catch the very beginning of the trend with some confidence that its rising over 2 days.
-                upTrending = (histogramList[0] > histogramList[1] > histogramList[2]) \
-                    and histogramList[2] < 0
-                
-            self.Debug("Gerad Trend Set")
+                upTrending = (float(histogramList[0]) > float(histogramList[1]) > float(histogramList[2])) \
+                    and float(histogramList[2]) < 0
+            
             return upTrending
     
     
     def OnSecuritiesChanged(self, changes):
-        self.Debug("Gerad OnSecuritiesChanged")
         currentBuyTotal = 0
         
         for symbol in self.OrderedByHighestOpportunity:
+            if not self.Securities.ContainsKey(str(symbol)):
+                self.AddSecurity(SecurityType.Equity, symbol, Resolution.Daily)
+                
             numberOfOrdersPossible = self.CalculateOrderQuantity(symbol, self.percentagePortfolioAllowedPerAsset)
             
             #Add 2% of order value to total cost check to ensure portfolio is not overdrawn
@@ -215,18 +226,16 @@ class MACDTrendAlgorithm(QCAlgorithm):
                 
                 if symbol not in self.ProfitsBySymbol:
                     self.ProfitsBySymbol[symbol] = (0, 0)
-                    
-                #Gerad Add updating histogram here to sell with look ahead
+                
                 currentBuyTotal += minimumCashNeeded
+        
         
     # Gannon this method always runs when and order is executed, right now the if statment quantity < 0 is only finding sell orders
     # You need to use this method to subtract the buy price from the final sale price. Then you need to find out in total how many stocks we've purchased
     # to find the total profits we've obtained from a stock.
     def OnOrderEvent(self, orderEvent):
-        self.Debug("Gerad OnOrderEvent")
         if orderEvent.FillQuantity < 0 and self.Portfolio[orderEvent.Symbol].Quantity == 0:
             self.averages[orderEvent.Symbol].refresh = True
-            
             
             # Gannon -CODING HERE you need to update the second index in the dictionary with the sum total profits from each invested stock.
             # The below example updates the dollar profits per stock in the dictionary.
@@ -244,11 +253,10 @@ class MACDTrendAlgorithm(QCAlgorithm):
             self.ProfitsBySymbol[orderEvent.Symbol] = (orderEvent.FillPrice - self.InvestedAssetsOriginalPriceList[orderEvent.Symbol], )
             #self.ProfitsBySymbol[orderEvent.Symbol] = self.InvestedAssetsSumTotalPriceList[orderEvent.Symbol] FINISH EQUATION
 
+
     #Update the trailing stop loss
     def EveryMarketOpen(self):
-        
         for asset in self.Securities:
-            
             #Take the higher of the prices (last close or current), and update the stop loss if necessary
             stopLossPriceCheck = max(self.Securities[asset.Key].Price, self.Securities[asset.Key].Close)
             
@@ -264,27 +272,6 @@ class MACDTrendAlgorithm(QCAlgorithm):
                     self.InvestedOrderInfoDictionary[asset.Key].Update(updateFields)
                     self.InvestedAssetsHighestPriceList[asset.Key] = stopLossPriceCheck
                     
-                    
-            #Beta - Stocks to watch, when you know ahead of time what stocks you want charted
-            #if asset.Key in self.Securities and self.Securities[asset.Key].Invested:
-            #and self.StockToWatch in asset.Key.Value:
-            if "AMZN" in asset.Key.Value or "PCLN" in asset.Key.Value:
-                
-                lastClosePriceHistory = self.History(asset.Key, 1, Resolution.Daily)
-                lastClosePrice = list(lastClosePriceHistory.itertuples())[0].close
-                
-                if asset.Key not in self.StocksToChart:
-                    history = self.History(asset.Key, 226, Resolution.Daily)
-                    self.StocksToChart[asset.Key] = SymbolTrendData(asset.Key, history, lastClosePrice)
-                
-                #Update watched stocks with latest data to chart    
-                self.StocksToChart[asset.Key].updateForCharting(lastClosePrice)   
-                
-                self.Plot(str(asset.Key.Value) + " Data Chart", "MacD", self.StocksToChart[asset.Key].macdValue)
-                self.Plot(str(asset.Key.Value) + " Data Chart", "Signal", self.StocksToChart[asset.Key].signalValue.GetMovingAverageForPeriod())
-                self.Plot(str(asset.Key.Value) + " Price Chart", "Fast", self.StocksToChart[asset.Key].fast.GetMovingAverageForPeriod())
-                self.Plot(str(asset.Key.Value) + " Price Chart", "Slow", self.StocksToChart[asset.Key].slow.GetMovingAverageForPeriod())
-                self.Plot(str(asset.Key.Value) + " Price Chart", "Price", lastClosePrice)
                 
         for asset in self.Securities:
             # Create trailing stop loss if invested 
@@ -296,24 +283,94 @@ class MACDTrendAlgorithm(QCAlgorithm):
                 if self.Securities[asset.Key].Invested and \
                     self.Transactions.GetOpenOrders(asset.Key) and \
                     stopLossPriceCheck > self.InvestedAssetsHighestPriceList[asset.Key]:
-                        
                     updateFields = UpdateOrderFields()
                     updateFields.StopPrice = safetyNet
                     self.InvestedOrderInfoDictionary[asset.Key].Update(updateFields)
                     self.InvestedAssetsHighestPriceList[asset.Key] = stopLossPriceCheck
-                    
+    
                 
     def OnEndOfAlgorithm(self):
-        self.Debug("Listing symbols that were invested over this algorithm run.")
         if len(self.ProfitsBySymbol) > 0:
             #Gannon this lambda index needs to change from 1 to be 2 instead, when you finish writing the sum total logic. key=lambda x:x[2]
-            sortedProfits = sorted(self.ProfitsBySymbol.items(), key=lambda x:x[0])
+            sortedProfits = sorted(self.ProfitsBySymbol.items(), key=lambda x:x[1])
             biggestLoser = sortedProfits[0]
             biggestWinner = sortedProfits[len(sortedProfits) - 1]
-            
             self.Debug("Biggest Loser Symbol: " + str(biggestLoser[0]) + " Profits: " + str(biggestLoser[1]))
             self.Debug("Biggest Winner Symbol: " + str(biggestWinner[0]) + " Profits: " + str(biggestWinner[1]))
+         
+            #Initiazlie Data for Charting Most Winning and Losing Assets 
+            minimumNumberOfPeriodsDate = timedelta(days = 252)
+            earliestDayNeeded = self.StartDate - minimumNumberOfPeriodsDate 
+            historyLength = (self.EndDate - earliestDayNeeded).days
+                
+            self.LosingMacdSeries = Series('Macd', SeriesType.Line)
+            self.LosingSignalSeries = Series('Signal', SeriesType.Line)
+            self.LosingPriceSeries = Series('Price', SeriesType.Line)
+            self.LosingShortEmaSeries = Series('ShortEma', SeriesType.Line)
+            self.LosingLongEmaSeries = Series('LongEma', SeriesType.Line)
+            self.WinningMacdSeries = Series('Macd', SeriesType.Line)
+            self.WinningSignalSeries = Series('Signal', SeriesType.Line)
+            self.WinningPriceSeries = Series('Price', SeriesType.Line)
+            self.WinningShortEmaSeries = Series('ShortEma', SeriesType.Line)
+            self.WinningLongEmaSeries = Series('LongEma', SeriesType.Line)
             
+            LosingMacdChart = Chart(str(biggestLoser[0]) + " Loser Macd Results", ChartType.Stacked)
+            LosingPriceChart = Chart(str(biggestLoser[0]) + " Loser Price Results", ChartType.Stacked)
+            WinningMacdChart = Chart(str(biggestWinner[0]) + " Winning Macd Results", ChartType.Stacked)
+            WinningPriceChart = Chart(str(biggestWinner[0]) + " Winning Price Results", ChartType.Stacked)
+            
+            LosingMacdChart.AddSeries(self.LosingMacdSeries)
+            LosingMacdChart.AddSeries(self.LosingSignalSeries)
+            LosingPriceChart.AddSeries(self.LosingPriceSeries)
+            LosingPriceChart.AddSeries(self.LosingShortEmaSeries)
+            LosingPriceChart.AddSeries(self.LosingLongEmaSeries)
+            WinningMacdChart.AddSeries(self.WinningMacdSeries)
+            WinningMacdChart.AddSeries(self.WinningSignalSeries)
+            WinningPriceChart.AddSeries(self.WinningPriceSeries)
+            WinningPriceChart.AddSeries(self.WinningShortEmaSeries)
+            WinningPriceChart.AddSeries(self.WinningLongEmaSeries)
+            
+            self.AddChart(LosingMacdChart)   
+            self.AddChart(LosingPriceChart)   
+            self.AddChart(WinningPriceChart)   
+            self.AddChart(WinningMacdChart)   
+            
+            biggestLoserHistory = self.History(biggestLoser[0], historyLength, Resolution.Daily).reset_index()
+            biggestWinnerHistory = self.History(biggestWinner[0], historyLength, Resolution.Daily).reset_index()
+            
+            #Plot Biggest Loser Data
+            macdLoser = SymbolTrendData(biggestLoser[0], biggestLoserHistory[:1]) #Initializes Trend Data with oldest day in history set
+            for tradeBar in list(biggestLoserHistory.itertuples())[1:]: # Chart out all values for this assets history
+                macdLoser.longEma.UpdateMovingAverage(tradeBar.close)
+                macdLoser.shortEma.UpdateMovingAverage(tradeBar.close)
+                macdLoser.fast.UpdateMovingAverage(tradeBar.close)
+                macdLoser.slow.UpdateMovingAverage(tradeBar.close)
+                macdLoser.update(tradeBar)
+                if macdLoser.CanUse == True:
+                    self.LosingMacdSeries.AddPoint(tradeBar.time, macdLoser.macdValue)
+                    self.LosingSignalSeries.AddPoint(tradeBar.time, macdLoser.signalValue.GetMovingAverageForPeriod())
+                    self.LosingPriceSeries.AddPoint(tradeBar.time, tradeBar.close)
+                    self.LosingShortEmaSeries.AddPoint(tradeBar.time, macdLoser.shortEma.GetMovingAverageForPeriod())
+                    self.LosingLongEmaSeries.AddPoint(tradeBar.time, macdLoser.longEma.GetMovingAverageForPeriod())
+                    self.Debug(str(tradeBar.time) + " -- Charting Most Losing Macd Asset: " + str(macdLoser))
+           
+            #Plot Biggest Winner Data    
+            macdWinner = SymbolTrendData(biggestWinner[0], biggestWinnerHistory[:-1])
+            for tradeBar in list(biggestWinnerHistory.itertuples())[1:]:
+                macdWinner.longEma.UpdateMovingAverage(tradeBar.close)
+                macdWinner.shortEma.UpdateMovingAverage(tradeBar.close)
+                macdWinner.fast.UpdateMovingAverage(tradeBar.close)
+                macdWinner.slow.UpdateMovingAverage(tradeBar.close)
+                macdWinner.update(tradeBar)
+                if macdWinner.CanUse == True:
+                    self.WinningMacdSeries.AddPoint(tradeBar.time, macdWinner.macdValue)
+                    self.WinningSignalSeries.AddPoint(tradeBar.time, macdWinner.signalValue.GetMovingAverageForPeriod())
+                    self.WinningPriceSeries.AddPoint(tradeBar.time, tradeBar.close)
+                    self.WinningShortEmaSeries.AddPoint(tradeBar.time, macdWinner.shortEma.GetMovingAverageForPeriod())
+                    self.WinningLongEmaSeries.AddPoint(tradeBar.time, macdWinner.longEma.GetMovingAverageForPeriod())
+                    self.Debug(str(tradeBar.time) + " -- Charting Most Winning Macd Asset: " + str(macdWinner))
+          
+        
         #for investedSymbol in self.InvestedHistory:
             #self.Debug("Symbol: " + str(investedSymbol[0]) + " DateTime: " + str(investedSymbol[1]) + " Data: " + str(investedSymbol[2]))
             #summarySymbol = SymbolTrendData(investedSymbol[0], investedSymbol[3])
@@ -321,11 +378,10 @@ class MACDTrendAlgorithm(QCAlgorithm):
         
         
     
-    
 class SymbolTrendData(object):
-    def __init__(self, symbol, history, price, logResults = False):
+    def __init__(self, symbol, history, price = 0, chart = False):
         self.symbol = symbol
-        self.price = price
+        self.price = price #Maybe Depreciated
         self.tolerance = 1.002
         self.longEma = GeradExponentialMovingAverage(200)
         self.shortEma = GeradExponentialMovingAverage(50)
@@ -342,6 +398,7 @@ class SymbolTrendData(object):
         self.histogramRepository = []
         self.differenceOfMacdAndSignal = 0
         self.differenceOfHistogramEarlySignal = 0
+        self.numberOfPeriodsSinceMacdBreak = 0
         self.CanUse = True #Change this to some optimization level when adding risk management 
         
         #Loop over the history data and update the indicators
@@ -362,8 +419,10 @@ class SymbolTrendData(object):
                 " lastUpdatedPrice " + str(self.lastUpdatedPrice) + \
                 " macdValue " + str(self.macdValue) + \
                 " macdSignalList " + str(self.macdSignalList) + \
+                " signalValue " + str(self.signalValue.GetMovingAverageForPeriod()) + \
                 " differenceOfMacdAndSignal " + str(self.differenceOfMacdAndSignal) + \
                 " differenceOfHistogramEarlySignal " + str(self.differenceOfHistogramEarlySignal) + \
+                " numberOfPeriodsSinceMacdBreak " + str(self.numberOfPeriodsSinceMacdBreak) + \
                 " CanUse " + str(self.CanUse)
     
     
@@ -373,6 +432,7 @@ class SymbolTrendData(object):
         self.longEma.UpdateMovingAverage(closePrice)
         self.shortEma.UpdateMovingAverage(closePrice)
         self.update(closePrice)    
+        self.price = closePrice
         
     def update(self, value):
         self.price = value
@@ -385,7 +445,7 @@ class SymbolTrendData(object):
             self.CanUse = False
             return
         
-        self.trending = fast > slow * self.tolerance and shortEma > longEma * self.tolerance
+        self.trending = fast > slow * self.tolerance #and shortEma > longEma * self.tolerance ****GERAD COMMENT THIS BACK AFTR GRAPH
         self.UpdateMacdAndSignalValues(fast, slow, value)
         signalEma = self.signalValue.GetMovingAverageForPeriod()
         
@@ -394,9 +454,22 @@ class SymbolTrendData(object):
             return
         
         self.scale = (self.macdValue) / ((fast + slow) / 2.0)
+        
+        # Save the old difference between macd - signal, to be used to detect when the macd first breaks the signal. 
+        # If the old difference is less than 0 (macd < signal when subtracting), 
+        #   and the new difference is greater than 0 (new macd > new signal when subtracting)
+        previousDifference = self.differenceOfMacdAndSignal
         self.differenceOfMacdAndSignal = self.macdValue - signalEma
+        
+        if previousDifference < 0 and self.differenceOfMacdAndSignal > 0:
+            self.numberOfPeriodsSinceMacdBreak = 0
+        else:
+            self.numberOfPeriodsSinceMacdBreak += 1
+            
         self.histogramRepository.insert(0, self.differenceOfMacdAndSignal)
         
+         
+             
         #Limit how many values the histogramRepository can hold 
         if len(self.histogramRepository) > self.signalLimit:
             self.histogramRepository = self.histogramRepository[:self.signalLimit]
